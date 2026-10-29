@@ -324,6 +324,7 @@ body.with-bar .app{padding-bottom:150px}
 .status{display:inline-flex;align-items:center;gap:6px;font-size:.8rem;font-weight:700;padding:5px 12px;border-radius:999px;background:var(--ok-soft);color:var(--ok)}
 .status.pending{background:var(--warn-soft);color:var(--warn)}
 .confirm-hero .small{max-width:46ch}
+#pdf-status:empty{display:none}
 .bp{display:grid;grid-template-columns:minmax(0,1fr);background:var(--surface);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
 @media (min-width:680px){.bp{grid-template-columns:minmax(0,1fr) 200px}}
 .bp-head{grid-column:1/-1;background:var(--accent);color:var(--accent-ink);display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 20px;font:700 .85rem var(--font-display);letter-spacing:.03em}
@@ -809,32 +810,184 @@ function viewPayment() {
   </form>`;
 }
 
-function code2d(seed) {
-  const N = 23, c = 11, r = rng(seed);
-  let rects = '';
-  for (let y = 0; y < N; y++) {
-    let x = 0;
-    while (x < N) {
-      const on = xx => { const d = Math.max(Math.abs(xx - c), Math.abs(y - c)); return d <= 4 ? d % 2 === 0 : d === 5 ? false : null; };
-      const fixed = on(x), dark = fixed === null ? r() < .5 : fixed;
-      if (dark) rects += `<rect x="${x}" y="${y}" width="1" height="1"/>`;
-      x++;
-    }
+// Code 2D façon Aztec : œil central fixe, modules aléatoires autour.
+function codeMatrix(seed) {
+  const N = 23, c = 11, r = rng(seed), m = [];
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const d = Math.max(Math.abs(x - c), Math.abs(y - c));
+    if (d <= 4 ? d % 2 === 0 : d !== 5 && r() < .5) m.push([x, y]);
   }
+  return m;
+}
+function code2d(seed) {
+  const rects = codeMatrix(seed).map(([x, y]) => `<rect x="${x}" y="${y}" width="1" height="1"/>`).join('');
   return `<svg class="code2d" viewBox="-1 -1 25 25" shape-rendering="crispEdges" role="img" aria-label="Code de démonstration, non valable"><rect class="bg" x="-1" y="-1" width="25" height="25"/><g class="fg">${rects}</g></svg>`;
+}
+const plainUpper = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+function bpName(p) {
+  const tag = p.type === 'adt' ? (p.title === 'Mme' ? 'MRS' : 'MR') : p.type === 'chd' ? 'CHD' : 'INF';
+  return `${plainUpper(p.last)}/${plainUpper(p.first)} ${tag}`;
+}
+const seatText = (leg, p, i) => leg.seats[i] || (p.type === 'inf' ? '—' : 'À l’enreg.');
+const deadlineText = b => new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).format(new Date(b.at + 864e5));
+
+/* ---------- PDF de la réservation ---------- */
+let jspdfLoad = null, dlApi = null;
+function loadJsPDF() {
+  if (window.jspdf) return Promise.resolve(window.jspdf.jsPDF);
+  return jspdfLoad ||= new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+    s.onload = () => window.jspdf ? resolve(window.jspdf.jsPDF) : reject({ code: 'load' });
+    s.onerror = () => { jspdfLoad = null; reject({ code: 'load' }); };
+    document.head.appendChild(s);
+  });
+}
+const downloadsApi = () => dlApi ||= (window.claude?.use ? window.claude.use('downloads') : Promise.resolve(null));
+async function savePdf(blob, filename) {
+  const api = await downloadsApi();
+  if (api) { await api.save({ filename, data: blob }); return 'saved'; }
+  if (window.claude) throw { code: 'unavailable' };      // cadre de visionneuse sans téléchargement
+  const url = URL.createObjectURL(blob), a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  return 'started';
+}
+async function makePdf() {
+  const JsPDF = await loadJsPDF();
+  const doc = new JsPDF({ unit: 'mm', format: 'a4' });
+  const W = 210, H = 297, M = 16, b = state.booking, t = totals(), ok = b.status === 'confirmed';
+  const C = { red: [174, 18, 57], ink: [29, 26, 27], grey: [95, 86, 89], soft: [138, 128, 131], line: [227, 220, 222], blush: [249, 243, 245],
+    mark: [248, 230, 235], white: [255, 255, 255], ok: [28, 122, 75], okBg: [225, 242, 231], warn: [138, 90, 0], warnBg: [252, 239, 214] };
+  // Les polices standard du PDF ne couvrent que le Latin-1 : on normalise espaces fines et apostrophes.
+  const T = s => String(s).replace(/[  ]/g, ' ').replace(/[’‘]/g, "'").replace(/…/g, '...');
+  const font = (style, size, color = C.ink, face = 'helvetica') => { doc.setFont(face, style); doc.setFontSize(size); doc.setTextColor(...color); };
+  const text = (s, x, yy, o) => doc.text(T(s), x, yy, o);
+  const rule = yy => { doc.setDrawColor(...C.line); doc.setLineWidth(.3); doc.line(M, yy, W - M, yy); };
+  const tail = (x, yy, size, fin, sw) => {
+    const k = size / 32;
+    doc.setFillColor(...fin);
+    doc.lines([[8.2, -24.4], [2.7, -2], [7.1, 0], [1.7, 2.4], [-7.1, 24]], x + 7 * k, yy + 29 * k, [k, k], 'F', true);
+    doc.setDrawColor(...sw); doc.setLineWidth(2.2 * k); doc.setLineCap('round');
+    doc.lines([[3.9, -3.3, 7.3, -9.6, 9.1, -16.8]], x + 12.6 * k, yy + 23.4 * k, [k, k], 'S', false);
+  };
+  const watermark = () => {
+    font('bold', 92, C.mark);
+    const w = doc.getTextWidth('SPÉCIMEN'), a = 35 * Math.PI / 180;
+    doc.text('SPÉCIMEN', W / 2 - Math.cos(a) * w / 2, H / 2 + 20 + Math.sin(a) * w / 2, { angle: 35 });
+  };
+  const band = () => {
+    doc.setFillColor(...C.red); doc.rect(0, 0, W, 24, 'F');
+    tail(M, 5, 14, C.white, C.red);
+    font('bold', 16, C.white); text('SimuVol', M + 15, 15);
+    font('normal', 10, C.white); text(ok ? 'Confirmation de réservation' : 'Option de réservation', W - M, 15, { align: 'right' });
+  };
+  let y = 36;
+  const need = h => { if (y + h > H - 22) { doc.addPage(); watermark(); band(); y = 36; } };
+  const section = (title, keep = 0) => { need(18 + keep); font('bold', 10, C.red); text(title.toUpperCase(), M, y, { charSpace: .3 }); rule(y + 2.5); y += 9; };
+  watermark(); band();
+
+  // Référence, statut et code
+  font('bold', 8, C.soft); text('RÉFÉRENCE DE RÉSERVATION (PNR)', M, y, { charSpace: .2 });
+  font('bold', 30, C.ink, 'courier'); text(b.pnr.split('').join(' '), M, y + 12);
+  const st = ok ? 'Confirmée · billets émis (simulation)' : `Option · à régler avant ${deadlineText(b)}`;
+  font('bold', 9, ok ? C.ok : C.warn);
+  doc.setFillColor(...(ok ? C.okBg : C.warnBg)); doc.roundedRect(M, y + 17, doc.getTextWidth(T(st)) + 8, 7, 3.5, 3.5, 'F');
+  text(st, M + 4, y + 21.8);
+  const stamp = new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(b.at));
+  font('normal', 9, C.grey); text(`Réservée le ${stamp} · ${paxSummary()}`, M, y + 31);
+  const cs = 30, cx = W - M - cs, cy = y - 5, mod = cs / 25;
+  doc.setFillColor(...C.ink);
+  codeMatrix(b.pnr).forEach(([x, yy]) => doc.rect(cx + (x + 1) * mod, cy + (yy + 1) * mod, mod + .04, mod + .04, 'F'));
+  font('normal', 7, C.soft); text('Code de démonstration', cx + cs / 2, cy + cs + 3.5, { align: 'center' });
+  y += 44;
+
+  // Itinéraire
+  const longDate = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  section('Itinéraire');
+  state.legs.forEach((leg, li) => {
+    const f = leg.flight, fa = FARE[leg.fare], h = 40, x0 = M + 6, x1 = W - M - 6, mx = W / 2;
+    need(h + 4);
+    doc.setFillColor(...C.blush); doc.roundedRect(M, y, W - 2 * M, h, 2.5, 2.5, 'F');
+    font('bold', 8, C.red); text(`${li ? 'RETOUR' : 'ALLER'} · ${longDate.format(parse(f.date)).toUpperCase()}`, x0, y + 7, { charSpace: .2 });
+    font('bold', 20); text(f.dep, x0, y + 17); text(f.arr, x1, y + 17, { align: 'right' });
+    font('bold', 11); text(f.from, x0, y + 24); text(f.to, x1, y + 24, { align: 'right' });
+    font('normal', 8.5, C.grey);
+    text(`${city(f.from)}, ${AIRPORTS[f.from].name}`, x0, y + 29);
+    text(`${city(f.to)}, ${AIRPORTS[f.to].name}${f.plus ? ' (J+1)' : ''}`, x1, y + 29, { align: 'right' });
+    doc.setDrawColor(...C.line); doc.setLineWidth(.4);
+    doc.line(x0 + 28, y + 14, mx - 7, y + 14); doc.line(mx + 7, y + 14, x1 - 28, y + 14);
+    tail(mx - 4, y + 10, 8, C.red, C.blush);
+    font('normal', 8.5); text(`Direct ${fmtDur(f.dur)}`, mx, y + 22, { align: 'center' });
+    doc.setDrawColor(...C.line); doc.setLineWidth(.3); doc.line(x0, y + 32, x1, y + 32);
+    font('normal', 8.5, C.grey);
+    text(`Vol ${f.no} · ${f.aircraft} · ${fa.cabin === 'biz' ? 'Affaires' : 'Économie'} ${fa.name} · ${fa.perks[0][1]}`, x0, y + 37);
+    y += h + 5;
+  });
+  y += 3;
+
+  // Passagers
+  section('Passagers');
+  const cols = state.legs.length > 1 ? [M, M + 82, M + 116, M + 148] : [M, M + 100, M + 140];
+  const heads = ['Passager', 'Type', ...(state.legs.length > 1 ? ['Siège aller', 'Siège retour'] : ['Siège'])];
+  font('bold', 7.5, C.soft); heads.forEach((h, i) => text(h.toUpperCase(), cols[i], y, { charSpace: .2 }));
+  rule(y + 2.5); y += 8;
+  state.passengers.forEach((p, i) => {
+    need(8);
+    font('bold', 9.5, C.ink, 'courier'); text(bpName(p), cols[0], y);
+    font('normal', 9.5); text(PT[p.type].one, cols[1], y);
+    state.legs.forEach((leg, li) => text(seatText(leg, p, i), cols[2 + li], y));
+    rule(y + 3); y += 8;
+  });
+  y += 4;
+
+  // Prix
+  const anySeat = state.legs.some(l => Object.keys(l.seats).length);
+  section('Détail du prix', t.rows.length * 12 + [anySeat, t.ins, t.bags].filter(Boolean).length * 6 + 17);   // bloc prix jamais coupé
+  const line = (label, val, sub) => {
+    need(7); font('normal', 9.5, sub ? C.grey : C.ink);
+    text(label, sub ? M + 4 : M, y); text(typeof val === 'number' ? money(val) : val, W - M, y, { align: 'right' }); y += 6;
+  };
+  t.rows.forEach(r => { line(`${r.n} ${(r.n > 1 ? PT[r.k].many : PT[r.k].one).toLowerCase()} · tarif aérien`, r.fare * r.n); line('Taxes et redevances', r.tax * r.n, true); });
+  if (anySeat) line('Sièges', t.seats || 'Offerts');
+  if (t.ins) line(`Assurance annulation (${paxCount()} passager${paxCount() > 1 ? 's' : ''})`, t.ins);
+  if (t.bags) line('Bagages supplémentaires', t.bags);
+  need(12); rule(y - 2); y += 5;
+  font('bold', 13); text(ok ? 'Total payé' : 'Total à régler', M, y); text(money(t.total), W - M, y, { align: 'right' });
+  y += 12;
+
+  // Paiement, contact et conditions
+  section('Paiement et contact');
+  font('normal', 9.5);
+  [`Moyen de paiement : ${PAY_LABEL[b.pay]}`, `E-mail : ${state.contact.email}`, `Téléphone : ${state.contact.cc} ${state.contact.phone}`]
+    .forEach(s => { need(6); text(s, M, y); y += 6; });
+  y += 4;
+  section('Conditions du tarif');
+  [...new Set(state.legs.map(l => l.fare))].forEach(id => {
+    const fa = FARE[id], perks = fa.perks.map(([, s], k) => k ? s[0].toLowerCase() + s.slice(1) : s).join(', ');
+    font('normal', 9.5);   // la police doit être fixée avant le découpage en lignes
+    const lines = doc.splitTextToSize(T(`${fa.name} : ${perks}.`), W - 2 * M);
+    need(lines.length * 5 + 2); doc.text(lines, M, y); y += lines.length * 5 + 2;
+  });
+
+  // Pied de page sur chaque page
+  const n = doc.getNumberOfPages();
+  for (let i = 1; i <= n; i++) {
+    doc.setPage(i); rule(H - 16);
+    font('normal', 7.5, C.soft);
+    text('Document de simulation SimuVol, compagnie fictive. Ni billet, ni preuve de réservation : non valable pour voyager.', M, H - 11);
+    text(`${i}/${n}`, W - M, H - 11, { align: 'right' });
+  }
+  return doc.output('blob');
 }
 
 function viewConfirm() {
   const b = state.booking, ok = b.status === 'confirmed', t = totals();
-  const deadline = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).format(new Date(b.at + 864e5));
-  const plain = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
   const pass = (leg, li) => {
     const f = leg.flight, fa = FARE[leg.fare];
-    const rows = state.passengers.map((p, i) => {
-      const tag = p.type === 'adt' ? (p.title === 'Mme' ? 'MRS' : 'MR') : p.type === 'chd' ? 'CHD' : 'INF';
-      const seat = leg.seats[i] || (p.type === 'inf' ? '—' : 'À l’enreg.');
-      return `<tr><td class="mono">${esc(plain(p.last))}/${esc(plain(p.first))} ${tag}</td><td class="mono">${seat}</td><td>${p.type === 'inf' ? 'Sur les genoux' : fa.name}</td></tr>`;
-    }).join('');
+    const rows = state.passengers.map((p, i) =>
+      `<tr><td class="mono">${esc(bpName(p))}</td><td class="mono">${seatText(leg, p, i)}</td><td>${p.type === 'inf' ? 'Sur les genoux' : fa.name}</td></tr>`).join('');
     return `<article class="bp" aria-label="Carte d’embarquement ${li ? 'retour' : 'aller'}">
       <header class="bp-head"><span class="brand-sm">${ICON.tail}SimuVol</span><span>Carte d’embarquement · ${li ? 'Retour' : 'Aller'}</span></header>
       <div class="bp-main">
@@ -858,8 +1011,10 @@ function viewConfirm() {
     <h1 tabindex="-1">${ok ? 'Réservation confirmée' : 'Option enregistrée'}</h1>
     <p class="muted">Référence de réservation (PNR)</p>
     <div class="pnr-row"><span class="pnr" id="pnr">${b.pnr}</span><button type="button" class="btn ghost sm" data-action="copy">Copier</button></div>
-    <span class="status${ok ? '' : ' pending'}">${ok ? 'Billets émis · simulation' : `À régler avant ${deadline}`}</span>
+    <span class="status${ok ? '' : ' pending'}">${ok ? 'Billets émis · simulation' : `À régler avant ${deadlineText(b)}`}</span>
     <p class="muted small">Un e-mail de confirmation serait envoyé à <b>${esc(state.contact.email)}</b>. Dans cette simulation, aucun e-mail n’est envoyé.</p>
+    <button type="button" class="btn" data-action="pdf">Télécharger la réservation (PDF)</button>
+    <p class="muted small" id="pdf-status" role="status" aria-live="polite"></p>
   </div>
   ${state.legs.map(pass).join('')}
   <section class="card"><div class="paid"><span>${ok ? 'Montant payé' : 'Montant à régler'}</span><b>${money(t.total)}</b></div><p class="muted small">${PAY_LABEL[b.pay]} · ${paxSummary()}</p></section>
@@ -1056,6 +1211,20 @@ const actions = {
     const fallback = () => { const r = document.createRange(); r.selectNodeContents($('#pnr')); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); b.textContent = 'Sélectionné, copiez avec Ctrl+C'; };
     try { navigator.clipboard.writeText(pnr).then(() => { b.textContent = 'Copié'; }, fallback); } catch { fallback(); }
   },
+  async pdf(b) {
+    const out = $('#pdf-status'), name = `reservation-${state.booking.pnr}.pdf`;
+    b.disabled = true; out.textContent = 'Préparation du PDF…';
+    try {
+      const res = await savePdf(await makePdf(), name);
+      out.textContent = res === 'saved' ? `PDF enregistré : ${name}` : `Téléchargement lancé : ${name}`;
+    } catch (e) {
+      const code = e && e.code;
+      out.textContent = code === 'declined' ? 'Téléchargement annulé.'
+        : code === 'load' ? 'Le générateur PDF n’a pas pu être chargé. Vérifiez la connexion Internet, puis réessayez.'
+        : code === 'rate_limited' ? 'Une demande de téléchargement est déjà ouverte. Répondez-y, puis réessayez.'
+        : 'Le téléchargement n’est pas disponible dans cette vue. Ouvrez le fichier reservation-vol.html dans un navigateur.';
+    } finally { b.disabled = false; }
+  },
   restart() { state = freshState(state.currency); go('search'); },
 };
 
@@ -1102,6 +1271,7 @@ document.addEventListener('input', e => {
 /* ---------- Démarrage ---------- */
 const start = data => { state = data && data.state ? data.state : freshState(loadCurrency()); render(); };
 window.claude?.hot?.snapshot?.(() => ({ state }));
+downloadsApi();   // résolu d’avance pour que le clic « PDF » réponde tout de suite
 window.claude?.hot?.ready ? window.claude.hot.ready(start) : start(window.claude?.hot?.data ?? {});
 })();
 </script>
