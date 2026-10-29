@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 </head>
 <body>
-<title>SimuVol Réservation</title>
+<title>reservation-vol</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -496,8 +496,8 @@ function occupancy(f) {
 const ownerOf = (leg, id) => { const k = Object.keys(leg.seats).find(k => leg.seats[k] === id); return k === undefined ? -1 : +k; };
 
 /* ---------- État ---------- */
-function loadCurrency() { try { const c = localStorage.getItem('simuvol-devise'); return CURRENCIES[c] ? c : 'XOF'; } catch { return 'XOF'; } }
-function saveCurrency(c) { try { localStorage.setItem('simuvol-devise', c); } catch {} }
+function loadCurrency() { try { const c = localStorage.getItem('reservation-vol-devise'); return CURRENCIES[c] ? c : 'XOF'; } catch { return 'XOF'; } }
+function saveCurrency(c) { try { localStorage.setItem('reservation-vol-devise', c); } catch {} }
 function defaultSearch() {
   const t = todayISO(), dep = '2026-11-05' >= t ? '2026-11-05' : addDays(t, 7);
   return { trip: 'oneway', from: 'DSS', to: 'CMN', dep, ret: addDays(dep, 7), adt: 1, chd: 0, inf: 0, cabin: 'eco' };
@@ -580,7 +580,7 @@ function timeline(f, lg) {
 /* ---------- Vues ---------- */
 function header() {
   return `<header class="topbar">
-    <div class="brand">${ICON.tail}<span>SimuVol</span><span class="tag-sim">Simulation</span></div>
+    <div class="brand">${ICON.tail}<span>reservation-vol</span><span class="tag-sim">Simulation</span></div>
     <label class="cur" for="currency">Devise <select id="currency">${Object.keys(CURRENCIES).map(c => `<option value="${c}"${c === state.currency ? ' selected' : ''}>${c}</option>`).join('')}</select></label>
   </header>`;
 }
@@ -621,7 +621,7 @@ function viewSearch() {
     <p class="err" id="search-err" role="alert">${esc(state.searchErr)}</p>
     <button class="btn block" type="submit">Rechercher des vols</button>
   </form>
-  <p class="note">${ICON.info}<span>SimuVol est une compagnie fictive. Les vols et les prix sont générés automatiquement, aucun paiement n’est effectué et aucune donnée ne quitte votre navigateur.</span></p>`;
+  <p class="note">${ICON.info}<span>reservation-vol est une compagnie fictive. Les vols et les prix sont générés automatiquement, aucun paiement n’est effectué et aucune donnée ne quitte votre navigateur.</span></p>`;
 }
 
 function viewFlights(li) {
@@ -880,7 +880,7 @@ async function makePdf() {
   const band = () => {
     doc.setFillColor(...C.red); doc.rect(0, 0, W, 24, 'F');
     tail(M, 5, 14, C.white, C.red);
-    font('bold', 16, C.white); text('SimuVol', M + 15, 15);
+    font('bold', 16, C.white); text('reservation-vol', M + 15, 15);
     font('normal', 10, C.white); text(ok ? 'Confirmation de réservation' : 'Option de réservation', W - M, 15, { align: 'right' });
   };
   let y = 36;
@@ -976,7 +976,7 @@ async function makePdf() {
   for (let i = 1; i <= n; i++) {
     doc.setPage(i); rule(H - 16);
     font('normal', 7.5, C.soft);
-    text('Document de simulation SimuVol, compagnie fictive. Ni billet, ni preuve de réservation : non valable pour voyager.', M, H - 11);
+    text('Document de simulation reservation-vol, compagnie fictive. Ni billet, ni preuve de réservation : non valable pour voyager.', M, H - 11);
     text(`${i}/${n}`, W - M, H - 11, { align: 'right' });
   }
   return doc.output('blob');
@@ -989,7 +989,7 @@ function viewConfirm() {
     const rows = state.passengers.map((p, i) =>
       `<tr><td class="mono">${esc(bpName(p))}</td><td class="mono">${seatText(leg, p, i)}</td><td>${p.type === 'inf' ? 'Sur les genoux' : fa.name}</td></tr>`).join('');
     return `<article class="bp" aria-label="Carte d’embarquement ${li ? 'retour' : 'aller'}">
-      <header class="bp-head"><span class="brand-sm">${ICON.tail}SimuVol</span><span>Carte d’embarquement · ${li ? 'Retour' : 'Aller'}</span></header>
+      <header class="bp-head"><span class="brand-sm">${ICON.tail}reservation-vol</span><span>Carte d’embarquement · ${li ? 'Retour' : 'Aller'}</span></header>
       <div class="bp-main">
         <div class="bp-codes"><div><span class="iata">${f.from}</span><span class="city">${city(f.from)}</span></div><span class="track">${ICON.tail}</span><div class="end"><span class="iata">${f.to}</span><span class="city">${city(f.to)}</span></div></div>
         <dl class="facts">
@@ -1059,7 +1059,7 @@ function render(opts = {}) {
   const showSum = state.step !== 'search' && state.step !== 'confirm';
   $('#app').innerHTML = header() + stepper()
     + `<div class="layout${showSum ? ' has-summary' : ''}"><main class="main" id="main">${VIEWS[state.step]()}</main>${showSum ? summary() : ''}</div>`
-    + '<p class="foot">SimuVol est une compagnie fictive. Vols, horaires et prix sont générés pour la démonstration.</p>';
+    + '<p class="foot">reservation-vol est une compagnie fictive. Vols, horaires et prix sont générés pour la démonstration.</p>';
   document.body.classList.toggle('with-bar', showSum);
   if (opts.focus) {
     const el = $(opts.focus);
